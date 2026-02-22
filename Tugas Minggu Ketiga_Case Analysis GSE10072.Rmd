@@ -1,0 +1,400 @@
+---
+title: "Tugas Minggu Ketiga – Case Analysis: GSE10072"
+author: "Hanif Fauzan Saputra"
+date: "2026-02-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(GEOquery)
+library(limma)
+library(pheatmap)
+library(ggplot2)
+library(dplyr)
+library(hgu133a.db)
+library(AnnotationDbi)
+library(umap)
+```
+#1. Pendahuluan
+
+Laporan ini menganalisis dataset GSE10072 dari database GEO untuk mengidentifikasi Differentially Expressed Genes (DEGs) pada kasus Adenokarsinoma Paru dibandingkan dengan jaringan paru normal. Analisis ini penting untuk memahami perubahan molekuler yang terjadi pada sel kanker paru.
+
+#2. Metode
+
+Analisis dilakukan menggunakan bahasa pemrograman R dengan tahapan sebagai berikut:
+
+  a. Pengambilan Data: Mengunduh dataset menggunakan GEOquery.
+
+  b. Preprocessing: Melakukan log2 transformasi untuk menstabilkan varians data microarray.
+
+  c. Analisis Statistik: Menggunakan model linear dari package limma dengan koreksi False Discovery Rate (FDR).
+
+  Visualisasi: Menggunakan Volcano Plot, Heatmap (Top 50 DEGs), dan UMAP untuk melihat pengelompokan sampel.
+
+#PENGAMBILAN DATA DARI GEO 
+```{r}
+gset <- getGEO("GSE10072", GSEMatrix = TRUE, AnnotGPL = TRUE)[[1]]
+```
+
+#PRE-PROCESSING DATA EKSPRESI 
+```{r}
+ex <- exprs(gset)
+```
+```{r}
+qx <- as.numeric(quantile(ex, c(0, 0.25, 0.5, 0.75, 0.99, 1), na.rm = TRUE))
+
+```
+```{r}
+LogTransform <- (qx[5] > 100) || (qx[6] - qx[1] > 50 && qx[2] > 0)
+
+```
+
+#IF statement:
+#Jika LogTransform = TRUE, maka lakukan log2
+```{r}
+if (LogTransform) {
+  # Nilai <= 0 tidak boleh di-log, maka diubah menjadi NA
+  ex[ex <= 0] <- NA
+  ex <- log2(ex)
+}
+
+```
+
+#DEFINISI KELOMPOK SAMPEL
+```{r}
+group_info <- pData(gset)[["source_name_ch1"]]
+```
+
+#make.names(): mengubah teks menjadi format valid untuk R
+```{r}
+groups <- make.names(group_info)
+```
+#factor():
+#Mengubah data kategorik menjadi faktor
+```{r}
+gset$group <- factor(groups)
+
+```
+#levels(): melihat kategori unik dalam faktor
+```{r}
+nama_grup <- levels(gset$group)
+print(nama_grup)
+
+```
+
+#DESIGN MATRIX (KERANGKA STATISTIK) 
+#model.matrix():
+#Membuat matriks desain untuk model linear
+```{r}
+design <- model.matrix(~0 + gset$group)
+```
+
+#colnames(): memberi nama kolom agar mudah dibaca
+```{r}
+colnames(design) <- levels(gset$group)
+```
+
+#Menentukan perbandingan biologis
+```{r}
+grup_kanker <- nama_grup[1]
+grup_normal <- nama_grup[2]
+
+contrast_formula <- paste(grup_kanker, "-", grup_normal)
+print(paste("Kontras yang dianalisis:", contrast_formula))
+
+```
+#ANALISIS DIFFERENTIAL EXPRESSION (LIMMA)
+#Membangun model linear untuk setiap gen
+```{r}
+fit <- lmFit(ex, design)
+
+```
+
+#makeContrasts(): mendefinisikan perbandingan antar grup
+```{r}
+contrast_matrix <- makeContrasts(contrasts = contrast_formula, levels = design)
+
+```
+
+#contrasts.fit(): menerapkan kontras ke model
+```{r}
+fit2 <- contrasts.fit(fit, contrast_matrix)
+
+```
+
+#eBayes():
+#Empirical Bayes untuk menstabilkan estimasi varians
+```{r}
+fit2 <- eBayes(fit2)
+```
+
+#topTable():
+#Mengambil hasil akhir DEG
+```{r}
+topTableResults <- topTable(
+  fit2,
+  adjust = "fdr",
+  sort.by = "B",
+  number = Inf,
+  p.value = 0.01
+)
+
+```
+```{r}
+head(topTableResults)
+
+```
+
+#ANOTASI NAMA GEN 
+
+#Mengambil ID probe dari hasil DEG
+```{r}
+probe_ids <- rownames(topTableResults)
+```
+#Mapping probe -> gene symbol & gene name
+```{r}
+gene_annotation <- AnnotationDbi::select(
+  hgu133a.db,
+  keys = probe_ids,
+  columns = c("SYMBOL", "GENENAME"),
+  keytype = "PROBEID"
+)
+
+```
+
+#Gabungkan dengan hasil limma
+```{r}
+topTableResults$PROBEID <- rownames(topTableResults)
+
+topTableResults <- merge(
+  topTableResults,
+  gene_annotation,
+  by = "PROBEID",
+  all.x = TRUE
+)
+
+```
+
+#Cek hasil anotasi
+```{r}
+head(topTableResults[, c("PROBEID", "SYMBOL", "GENENAME")])
+```
+
+#BOXPLOT DISTRIBUSI NILAI EKSPRESI 
+
+#Set warna berdasarkan grup
+```{r}
+group_colors <- as.numeric(gset$group)
+
+boxplot(
+  ex,
+  col = group_colors,
+  las = 2,
+  outline = FALSE,
+  main = "Boxplot Distribusi Nilai Ekspresi per Sampel",
+  ylab = "Expression Value (log2)"
+)
+
+legend(
+  "topright",
+  legend = levels(gset$group),
+  fill = unique(group_colors),
+  cex = 0.8
+)
+
+```
+
+Berdasarkan visualisasi boxplot yang dihasilkan:
+
+Interpretasi: Terlihat bahwa garis median (garis hitam di tengah kotak) untuk seluruh sampel berada pada level yang relatif sejajar. Rentang nilai ekspresi setelah transformasi log2 berada pada kisaran yang konsisten.
+
+Makna: Hal ini menunjukkan bahwa data telah ternormalisasi dengan baik dan tidak terdapat batch effect atau perbedaan teknis yang mencolok antar sampel. Data ini sudah layak untuk dibandingkan antar kelompok (Kanker vs Normal).
+
+#DISTRIBUSI NILAI EKSPRESI (DENSITY PLOT) 
+
+#Gabungkan ekspresi & grup ke data frame
+```{r}
+expr_long <- data.frame(
+  Expression = as.vector(ex),
+  Group = rep(gset$group, each = nrow(ex))
+)
+
+ggplot(expr_long, aes(x = Expression, color = Group)) +
+  geom_density(linewidth = 1) +
+  theme_minimal() +
+  labs(
+    title = "Distribusi Nilai Ekspresi Gen",
+    x = "Expression Value (log2)",
+    y = "Density"
+  )
+
+```
+
+Plot UMAP menunjukkan pemisahan yang sangat jelas antara kelompok sampel Adenokarsinoma Paru dan jaringan Normal.
+
+Pemisahan kelompok yang tegas ini membuktikan bahwa profil ekspresi gen pada kanker paru memang memiliki ciri khas yang sangat berbeda dibandingkan jaringan sehat, sehingga identifikasi gen spesifik (biomarker) menjadi sangat dimungkinkan.
+
+#UMAP (VISUALISASI DIMENSI RENDAH)
+
+#Transpose matriks ekspresi:
+#UMAP bekerja pada OBSERVATION = sampel
+```{r}
+umap_input <- t(ex)
+```
+#Jalankan UMAP
+```{r}
+umap_result <- umap(umap_input)
+```
+#Simpan hasil ke data frame
+```{r}
+umap_df <- data.frame(
+  UMAP1 = umap_result$layout[, 1],
+  UMAP2 = umap_result$layout[, 2],
+  Group = gset$group
+)
+
+```
+#Plot UMAP
+```{r}
+ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = Group)) +
+  geom_point(size = 3, alpha = 0.8) +
+  theme_minimal() +
+  labs(
+    title = "UMAP Plot Sampel Berdasarkan Ekspresi Gen",
+    x = "UMAP 1",
+    y = "UMAP 2"
+  )
+```
+
+Pada plot UMAP yang dihasilkan, terlihat dua kelompok besar titik yang terpisah secara tegas di ruang dua dimensi (UMAP 1 dan UMAP 2). Titik-titik yang mewakili sampel "Lung Adenocarcinoma" (kanker) berkumpul di satu area, sementara sampel "Normal" berkumpul di area lainnya tanpa adanya tumpang tindih (overlap) yang signifikan.
+
+Pemisahan yang sangat kontras ini menunjukkan bahwa perbedaan molekuler antara jaringan kanker paru dan jaringan sehat sangat masif. Hal ini membuktikan bahwa dataset GSE10072 memiliki sinyal biologis yang sangat kuat, sehingga hasil analisis Differential Expression (DEG) yang didapatkan bersifat valid dan dapat dipercaya.
+
+#VISUALISASI VOLCANO PLOT 
+
+```{r}
+volcano_data <- data.frame(
+  logFC = topTableResults$logFC,
+  adj.P.Val = topTableResults$adj.P.Val,
+  Gene = topTableResults$SYMBOL
+)
+```
+
+#Klasifikasi status gen
+```{r}
+
+volcano_data$status <- "NO"
+volcano_data$status[volcano_data$logFC > 1 & volcano_data$adj.P.Val < 0.01] <- "UP"
+volcano_data$status[volcano_data$logFC < -1 & volcano_data$adj.P.Val < 0.01] <- "DOWN"
+
+```
+
+#Visualisasi
+```{r}
+
+ggplot(volcano_data, aes(x = logFC, y = -log10(adj.P.Val), color = status)) +
+  geom_point(alpha = 0.6) +
+  scale_color_manual(values = c("DOWN" = "blue", "NO" = "grey", "UP" = "red")) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.01), linetype = "dashed") +
+  theme_minimal() +
+  ggtitle("Volcano Plot DEG Kanker Paru")
+
+```
+
+Berdasarkan analisis statistik menggunakan limma, ditemukan sejumlah gen yang memiliki perubahan ekspresi sangat signifikan (p-value < 0.01).
+
+Gen Upregulated: Gen CYP1B1 menunjukkan kenaikan ekspresi yang paling signifikan dengan nilai log Fold Change (logFC) sebesar 2.76. Hal ini mengindikasikan bahwa gen tersebut aktif secara berlebihan pada jaringan kanker paru dibandingkan normal.
+
+Gen Downregulated: Beberapa gen menunjukkan penurunan ekspresi yang drastis, seperti AGER (logFC -5.38), CAV1 (logFC -4.32), dan CLIC5 (logFC -4.22). Penurunan gen AGER sering dikaitkan dengan hilangnya fungsi pembersihan pada jaringan paru-paru yang terkena kanker.
+
+#VISUALISASI HEATMAP 
+
+#Pilih 50 gen paling signifikan berdasarkan adj.P.Val
+```{r}
+topTableResults <- topTableResults[
+  order(topTableResults$adj.P.Val),
+]
+
+top50 <- head(topTableResults, 50)
+```
+#Ambil matriks ekspresi untuk gen terpilih
+```{r}
+mat_heatmap <- ex[top50$PROBEID, ]
+
+```
+#Gunakan Gene Symbol (fallback ke Probe ID)
+```{r}
+gene_label <- ifelse(
+  is.na(top50$SYMBOL) | top50$SYMBOL == "",
+  top50$PROBEID,      # jika SYMBOL kosong → probe ID
+  top50$SYMBOL        # jika ada → gene symbol
+)
+
+rownames(mat_heatmap) <- gene_label
+
+```
+
+#Pembersihan data
+#Hapus baris dengan NA
+```{r}
+mat_heatmap <- mat_heatmap[
+  rowSums(is.na(mat_heatmap)) == 0,
+]
+
+```
+
+#Hapus gen dengan varians nol
+```{r}
+gene_variance <- apply(mat_heatmap, 1, var)
+mat_heatmap <- mat_heatmap[gene_variance > 0, ]
+
+```
+
+#Anotasi kolom (kelompok sampel)
+```{r}
+annotation_col <- data.frame(
+  Group = gset$group
+)
+
+rownames(annotation_col) <- colnames(mat_heatmap)
+
+```
+
+#Visualisasi heatmap 
+```{r}
+pheatmap(
+  mat_heatmap,
+  scale = "row",                 # Z-score per gen
+  annotation_col = annotation_col,
+  show_colnames = FALSE,         # nama sampel dimatikan
+  show_rownames = TRUE,
+  fontsize_row = 7,
+  clustering_distance_rows = "euclidean",
+  clustering_distance_cols = "euclidean",
+  clustering_method = "complete",
+  main = "Top 50 Differentially Expressed Genes"
+)
+
+```
+
+Visualisasi heatmap menunjukkan pola ekspresi yang sangat kontras antara kelompok kontrol dan perlakuan.Klastering: Sampel terkumpul secara konsisten berdasarkan kondisinya, di mana 50 gen teratas (termasuk PEBP4, SPOCK2, dan SCGB1A1) menunjukkan perbedaan intensitas warna (z-score) yang tajam antara jaringan normal dan tumor.Signifikansi: Tingkat signifikansi (Adjusted P-Value) pada gen-gen ini sangat rendah, yang membuktikan bahwa perbedaan tersebut bukan terjadi karena faktor kebetulan.
+
+#MENYIMPAN HASIL 
+
+#menyimpan hasil analisis ke file CSV
+```{r}
+write.csv(topTableResults, "Hasil_GSE10072_DEG.csv")
+
+message("Analisis selesai. File hasil telah disimpan.")
+
+```
+
+#Kesimpulan
+
+  a. Analisis dataset GSE10072 berhasil mengidentifikasi profil genetik yang khas pada Adenokarsinoma Paru.
+
+  b. Gen AGER dan CAV1 ditemukan sebagai gen yang paling tertekan (downregulated), sementara CYP1B1 menjadi salah satu gen yang paling meningkat (upregulated).
+
+  c. Perbedaan ekspresi yang sangat tajam pada gen-gen ini menunjukkan potensi mereka sebagai biomarker diagnostik untuk membedakan antara jaringan paru sehat dan tumor dengan tingkat akurasi statistik yang tinggi.
